@@ -100,6 +100,11 @@ fm_test_fake_gh_axi() {
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
 # suites that do not set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
+#
+# A submitted text line is RUN, through the fm-fake-shell-exec helper installed
+# alongside the stub: fm-spawn proves an endpoint's shell is reading input by a
+# side effect that shell must produce, so a stub that swallows every send reads
+# as a pane whose shell never came up and the spawn correctly refuses.
 fm_test_fake_tmux_spawn() {
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'
@@ -118,6 +123,10 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
+    # Run a submitted text line as the pane's shell would, so fm-spawn's
+    # shell-readiness probe is answered; the literal launch send stays this
+    # stub's own to log.
+    fm-fake-shell-exec "$@"
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -133,6 +142,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_shell_exec "$fakebin"
 }
 
 # fm_test_fake_tmux_send <fakebin>
