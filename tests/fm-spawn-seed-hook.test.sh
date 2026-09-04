@@ -31,6 +31,12 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-seed-hook)
 # The shared spawn fixture logs only `-l` literal payloads, which would hide the
 # plain `cd` that moves the pane into the copy - the exact step whose position
 # relative to the hook this suite exists to prove.
+#
+# Submitted text lines are also RUN, through the same fm-fake-shell-exec helper
+# the shared fixture uses: fm-spawn proves an endpoint's shell is reading input
+# before typing a line it cannot afford to lose, and it proves it by a side
+# effect that shell must produce, so a stub that only logs reads as a pane whose
+# shell never came up. The log is what this suite asserts on and is unaffected.
 make_seed_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -52,6 +58,7 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
+    fm-fake-shell-exec "$@"
     # Log the payload arguments only: drop the subcommand, the -t target pair,
     # the -l literal flag and a trailing Enter, so the log is the ordered list
     # of what a shell in that pane would have been asked to read.
@@ -72,6 +79,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_shell_exec "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
