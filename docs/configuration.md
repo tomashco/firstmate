@@ -429,6 +429,42 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Project worktree seeding hooks (config/seed-hooks/)
+
+A fresh task worktree of some projects is not usable as checked out: it may need per-slot databases, generated local config, a symlinked secrets file, or a per-slot MCP server registered before the worker's session starts.
+`config/seed-hooks/` is an optional local, gitignored directory where a home declares the command that prepares one worktree of one project.
+The file name is the project directory's basename, exactly as `data/projects.md` records it, and the file is the executable itself - most often a symlink to a script that already lives outside this repo.
+This section is the single owner of that contract.
+
+```
+config/seed-hooks/pravda -> /path/to/your/tools/seed-pravda-worktree.sh
+```
+
+Firstmate contributes only the ordering; which command prepares a worktree stays project-local knowledge that never enters the shared scripts.
+A project with no file here spawns exactly as it did before this directory existed.
+
+`bin/fm-spawn.sh` invokes a declared hook as `<hook> <worktree-path> --task-id <task-id>`, with the working directory set to the project checkout and stdin connected to `/dev/null`.
+Everything the hook writes to stdout and stderr passes through to the operator, so a hook that reports what it could not do is read where the spawn is run.
+Exit `0` means the worktree is ready and the spawn continues.
+Any non-zero exit refuses the spawn with nothing typed into the worker's terminal, deliberately including a hook that reports partial success: a hook naming gaps is saying the copy is not ready, and launching into it anyway is what this contract exists to prevent.
+A hook that reaches an interactive prompt reads end-of-input and fails, which refuses the spawn rather than answering the prompt with firstmate's own text.
+
+The ordering matters beyond capability. A worktree that reaches an interactive prompt during shell startup leaves the pane not reading a command line, so every line typed into it is consumed as a value rather than run.
+For a project with a hook, `fm-spawn.sh` therefore acquires the worktree with `treehouse get --lease` from its own process instead of typing `treehouse get` into the pane, runs the hook, and only then sends the pane into the prepared copy.
+No shell enters the worktree before the hook has answered whatever its startup would otherwise prompt for.
+`bin/fm-teardown.sh` releases that lease through the same `treehouse return` it already uses.
+A spawn abandoned before the hook ran releases it too, but one abandoned after the hook started deliberately leaves it leased and says so: a hook may have allocated databases, remote branches or ports that only that project's own release step can free, and returning the slot would hand it to the next task while those are still allocated.
+`bin/fm-spawn.sh`'s header owns the residual windows this ordering does not close.
+
+A hook runs on a fresh spawn only.
+Relaunching an agent into an existing task reuses a copy that may hold the previous agent's uncommitted work, so no hook is run against it; prepare such a copy by hand if it needs it.
+
+A hook has no time limit.
+One that never returns stalls that spawn, and blocks other dispatch and cleanup in the same home until the operator interrupts it; an interrupt unwinds cleanly and releases the lease.
+
+Secondmate homes do not inherit this directory: a home's hooks name its own project clones and its own local tooling paths.
+A secondmate spawn never runs a hook at all, because it launches into a firstmate home rather than a project worktree.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

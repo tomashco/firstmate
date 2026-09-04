@@ -887,6 +887,33 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+# A relaunch reuses a copy that may hold the previous agent's uncommitted work,
+# so it must not run the project's worktree preparation step against it
+# (config/seed-hooks/<project>, docs/configuration.md). Running an arbitrary
+# project script over unlanded work is a risk firstmate cannot assess, and it
+# would not help the ordering anyway: a relaunch's pane is already inside the
+# copy. The step is a fresh-spawn contract only.
+test_relaunch_runs_no_worktree_preparation_step() {
+  local dir out marker
+  dir=$(new_case seedhook rl40)
+  add_ship_task "$dir" rl40 claude
+  marker="$dir/hook-ran"
+  mkdir -p "$dir/home/config/seed-hooks"
+  cat > "$dir/home/config/seed-hooks/proj" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+exit 0
+EOF
+  chmod +x "$dir/home/config/seed-hooks/proj"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl40 --relaunch)
+  assert_contains "$out" "spawned rl40" "the relaunch should still succeed"
+  [ ! -e "$marker" ] \
+    || fail "a relaunch ran the project's worktree preparation step against a copy that may hold uncommitted work"
+  pass "a relaunch runs no worktree preparation step over the copy holding its work"
+}
+
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
 # from a raw command records that command's basename rather than the exact
 # adapter name. Retirement must resolve the same way, or a task recorded as
@@ -1555,6 +1582,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_relaunch_runs_no_worktree_preparation_step
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch

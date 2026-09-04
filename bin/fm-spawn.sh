@@ -182,6 +182,24 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   A project may declare a worktree preparation step as an executable at
+#   config/seed-hooks/<project-basename>; docs/configuration.md "Project
+#   worktree seeding hooks" owns the operator contract. Firstmate contributes
+#   only the ORDERING: a hooked project's worktree is leased non-interactively
+#   with `treehouse get --lease` rather than by typing `treehouse get` into the
+#   pane, the step runs against it with stdin /dev/null, and only a zero exit
+#   sends the pane in. Any non-zero exit refuses the spawn with nothing typed,
+#   including a step reporting partial success. The point is that a shell can
+#   only enter the copy after the step has answered whatever its startup would
+#   otherwise prompt for, because a pane held at an interactive prompt consumes
+#   every typed line as a VALUE - which destroyed shared credentials twice.
+#   Residual windows this does not close: a project with no hook is untouched;
+#   a relaunch runs no hook at all, because its pane is already inside a copy
+#   that may hold uncommitted work, so a pane that reached a prompt earlier
+#   still consumes the launch line; and a step that exits 0 while its copy can
+#   still prompt is not detected, because the pane-entry check reads the shell's
+#   cwd rather than proving a shell is reading. A readiness probe layers on top
+#   of this ordering, not instead of it.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -873,6 +891,11 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SEED_HOOK=
+SEED_LEASED=0
+SEED_HOOK_RAN=0
+SEED_LEASE_PATH=
+SEED_LEASE_RELEASE=0
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -903,6 +926,28 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  # A lease this spawn took is only firstmate's to release while no task record
+  # names the worktree. Once the record is published, cleanup belongs to
+  # fm-teardown.sh and the flag is cleared, so an abort can never return a copy
+  # a live task's work lives in.
+  #
+  # Once the preparation step has started, though, the slot is no longer
+  # firstmate's to return either, even on an abort. A step may allocate
+  # resources OUTSIDE the worktree - a database, a remote branch, a registered
+  # port - that only that project's own release step can free, and returning the
+  # slot puts it back in the pool for reuse while those are still allocated.
+  # So an abort after the step ran keeps the lease and says what must happen
+  # instead: a leaked slot the operator is told about beats a recycled slot
+  # holding someone else's resources.
+  if [ "$SEED_LEASE_RELEASE" = 1 ]; then
+    SEED_LEASE_RELEASE=0
+    if [ -n "$SEED_LEASE_PATH" ] && [ "$SEED_HOOK_RAN" = 1 ]; then
+      echo "warning: the spawn of $ID was abandoned after its worktree preparation step ran, so $SEED_LEASE_PATH is left leased rather than returned to the pool; run that project's own release step for it and then 'treehouse return --force $SEED_LEASE_PATH'" >&2
+    elif [ -n "$SEED_LEASE_PATH" ] && command -v treehouse >/dev/null 2>&1; then
+      ( cd "$PROJ_ABS" && treehouse return --force "$SEED_LEASE_PATH" ) >/dev/null 2>&1 \
+        || echo "warning: could not release the leased worktree $SEED_LEASE_PATH after the aborted spawn of $ID; release it with 'treehouse return --force $SEED_LEASE_PATH'" >&2
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -2261,6 +2306,23 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+# Optional per-project worktree preparation hook. Resolved here, before any
+# endpoint, worktree or per-task state exists, so a declared-but-unusable hook
+# refuses while a refusal still costs nothing. A secondmate spawns into a
+# firstmate home rather than a project worktree, so it never has one.
+# docs/configuration.md "Project worktree seeding hooks" owns the operator
+# contract; the ordering rationale is beside the run below.
+if [ "$KIND" != secondmate ]; then
+  SEED_HOOK_PATH="$CONFIG/seed-hooks/$(basename "$PROJ_ABS")"
+  if [ -e "$SEED_HOOK_PATH" ] || [ -L "$SEED_HOOK_PATH" ]; then
+    if [ ! -f "$SEED_HOOK_PATH" ] || [ ! -x "$SEED_HOOK_PATH" ]; then
+      echo "error: $PROJ_ABS declares a worktree preparation step at $SEED_HOOK_PATH, but it is not an executable file (a dangling symlink reads this way too); fix or remove it rather than launching into an unprepared copy" >&2
+      exit 1
+    fi
+    SEED_HOOK=$SEED_HOOK_PATH
+  fi
+fi
+
 real_path_or_raw() {  # <path>
   local path=$1 real
   if real=$(cd "$path" 2>/dev/null && pwd -P); then
@@ -2865,6 +2927,104 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 
+# --- project worktree preparation, ordered ahead of the pane ----------------
+#
+# Firstmate owns the ORDERING of a project's preparation step and nothing else.
+# WHICH command prepares a worktree is project-local knowledge that never
+# enters this script: a project declares its step by placing an executable at
+# config/seed-hooks/<project-basename>, and a project with no such file takes
+# the untouched typed-`treehouse get` path below.
+#
+# The ordering is the whole point. A fresh worktree's shell startup can reach an
+# INTERACTIVE prompt - a devenv/secretspec secrets prompt is the case this was
+# written for. A pane sitting at such a prompt is not reading a command line, so
+# every line typed into it is consumed as a VALUE. That is how a typed launch
+# brief overwrote credentials in a file shared by every copy of the project on
+# 2026-09-03 and again on 2026-09-04. No typing discipline can prevent it,
+# because to a prompt that is reading, every keystroke is an answer; a readiness
+# probe only moves which text gets eaten. Only ordering closes it.
+#
+# So a hooked project does not type `treehouse get`, which opens a subshell in
+# the worktree and can reach the prompt before firstmate even knows the path.
+# It leases the worktree from THIS process with `treehouse get --lease` - a
+# non-interactive acquire that prints the path and opens no shell anywhere -
+# runs the hook against it, and only then sends the pane a plain cd. By the time
+# any shell enters the copy, the prompt has already been answered on disk and
+# can no longer be reached. fm-teardown.sh's existing `treehouse return`
+# releases that lease exactly as it releases a get, and spawn_abort_cleanup owns
+# when an abandoned spawn may return the slot itself.
+
+# Acquire a worktree without any shell entering it. Sets WT on success.
+spawn_lease_worktree() {
+  local leased
+  command -v treehouse >/dev/null 2>&1 || {
+    echo "error: treehouse is required to prepare a worktree of $PROJ_ABS before launch, and it is not on PATH" >&2
+    return 1
+  }
+  # stdout is the path alone; treehouse sends every banner to stderr, which is
+  # left flowing so a pool problem is visible.
+  leased=$( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "fm-$ID" ) || {
+    echo "error: could not lease a worktree of $PROJ_ABS for $ID; nothing was typed into endpoint $T" >&2
+    return 1
+  }
+  leased=${leased%%$'\n'*}
+  [ -n "$leased" ] && [ -d "$leased" ] || {
+    echo "error: treehouse leased '${leased:-nothing}' for $ID, which is not a directory; nothing was typed into endpoint $T" >&2
+    return 1
+  }
+  WT=$leased
+  SEED_LEASED=1
+  SEED_LEASE_PATH=$leased
+  SEED_LEASE_RELEASE=1
+  return 0
+}
+
+# Run the project's preparation step against the leased or recorded worktree.
+# stdin is /dev/null so the hook can never consume firstmate's text as an
+# answer: a hook that reaches a prompt sees end-of-input and fails, which
+# refuses the spawn. Any non-zero exit refuses - deliberately including a
+# partial success, because a hook that reports gaps is telling firstmate the
+# copy is not ready and pravda's own seeder says so in as many words.
+#
+# No time bound, deliberately. A hook that never returns stalls this spawn while
+# it holds the task-set lock, which blocks other dispatch and cleanup in this
+# home until the operator interrupts it - and an interrupt unwinds cleanly
+# through the abort path, releasing the lease. The ceiling is that visible stall;
+# a bound would trade it for a half-prepared copy on a hook that is merely slow,
+# which is the worse failure. Add one only if a hook actually hangs in practice.
+spawn_run_seed_hook() {  # <worktree>
+  local wt=$1 rc=0
+  # Marked as started, not as finished: a step that fails partway can already
+  # have allocated resources outside the worktree, so the abort path must treat
+  # the slot as no longer safe to return either way.
+  SEED_HOOK_RAN=1
+  ( cd "$PROJ_ABS" && exec "$SEED_HOOK" "$wt" --task-id "$ID" ) < /dev/null || rc=$?
+  [ "$rc" -eq 0 ] || {
+    echo "error: the worktree preparation step for $PROJ_ABS exited $rc, so $wt is not ready; refusing to launch into an unprepared copy (the step's own output above names what is missing). Nothing was typed into endpoint $T" >&2
+    return 1
+  }
+  return 0
+}
+
+# Move the pane into the prepared copy. Unlike the typed-`treehouse get` path,
+# this compares the pane's cwd against the ONE expected worktree rather than
+# against "anything but the project", so a transiently stale read simply does
+# not match and the poll continues; no second confirming read is needed.
+spawn_enter_prepared_worktree() {  # <worktree>
+  local wt=$1 wt_real seen
+  wt_real=$(real_path_or_raw "$wt")
+  spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$wt")"
+  for _ in $(seq 1 60); do
+    seen=$(spawn_current_path "$WT_TARGET" || true)
+    if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$wt_real" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "error: endpoint $T did not enter the prepared copy $wt within 60s; refusing to type a launch brief into a pane whose shell may not be reading commands. Inspect window $T" >&2
+  return 1
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -3022,6 +3182,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -n "$SEED_HOOK" ]; then
+  # A project with a preparation step acquires its worktree without letting any
+  # shell in, so the step can run before the pane can reach an interactive
+  # prompt. The pane is sent in by spawn_enter_prepared_worktree further down,
+  # after the step has succeeded.
+  spawn_lease_worktree || exit 1
+  validate_spawn_worktree "treehouse lease" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -3086,6 +3253,24 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+fi
+
+# The preparation step runs after the base is freshened, because what it
+# prepares depends on the code the worker will actually get, and before any
+# launch text is typed.
+#
+# A relaunch deliberately does NOT run it. A relaunch reuses a copy that may
+# hold the previous agent's uncommitted work, and running an arbitrary project
+# script against that copy is a risk to unlanded work that firstmate cannot
+# assess from here. It would buy nothing for the ordering either: a relaunch's
+# pane is already inside the copy, so a pane that reached an interactive prompt
+# earlier still consumes the launch line whatever runs on disk first. That
+# residual window is named in the header rather than papered over.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ -n "$SEED_HOOK" ]; then
+  spawn_run_seed_hook "$WT" || exit 1
+  if [ "$SEED_LEASED" = 1 ]; then
+    spawn_enter_prepared_worktree "$WT" || exit 1
+  fi
 fi
 
 # Pre-register Claude's workspace trust for the worktree, at the first point the
@@ -3708,6 +3893,9 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+# The published record now names this worktree, so its lease is teardown's to
+# release rather than this abort path's.
+SEED_LEASE_RELEASE=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
