@@ -437,7 +437,7 @@ The file name is the project directory's basename, exactly as `data/projects.md`
 This section is the single owner of that contract.
 
 ```
-config/seed-hooks/pravda -> /path/to/your/tools/seed-pravda-worktree.sh
+config/seed-hooks/<project> -> /path/to/your/tools/seed-<project>-worktree.sh
 ```
 
 Firstmate contributes only the ordering; which command prepares a worktree stays project-local knowledge that never enters the shared scripts.
@@ -447,11 +447,18 @@ A project with no file here spawns exactly as it did before this directory exist
 Everything the hook writes to stdout and stderr passes through to the operator, so a hook that reports what it could not do is read where the spawn is run.
 Exit `0` means the worktree is ready and the spawn continues.
 Any non-zero exit refuses the spawn with nothing typed into the worker's terminal, deliberately including a hook that reports partial success: a hook naming gaps is saying the copy is not ready, and launching into it anyway is what this contract exists to prevent.
-A hook that reaches an interactive prompt reads end-of-input and fails, which refuses the spawn rather than answering the prompt with firstmate's own text.
+The property firstmate can actually guarantee is narrow, and worth stating exactly: no text firstmate would type into a worker's terminal ever reaches the hook, so a launch brief can never be consumed as an answer.
+A hook that reaches a prompt reading STDIN sees end-of-input there and fails, which refuses the spawn.
+A prompt that opens `/dev/tty` directly - the conventional way secret prompts are written, and how devenv/secretspec does it - is not covered by that redirection: such a hook blocks untimed on the operator's own terminal instead of failing, and the untimed-stall note below is what applies to it.
 
 A few paths inside the worktree are firstmate's, not the hook's, and a hook writing them loses its content silently - the spawn continues, because the hook exited `0`.
-`fm-spawn.sh` OVERWRITES `<worktree>/.claude/settings.local.json`, `<worktree>/.opencode/plugins/fm-busy-state.js`, `<worktree>/.fm-grok-turnend` and `<worktree>/.fm-kimi-turnend` after the hook has run, whichever of them the resolved harness needs, and `bin/fm-teardown.sh` deletes all of them (plus `<worktree>/.opencode/plugins/fm-turn-end.js`) when the task is torn down.
+`fm-spawn.sh` OVERWRITES `<worktree>/.claude/settings.local.json`, `<worktree>/.opencode/plugins/fm-busy-state.js`, `<worktree>/.fm-grok-turnend` and `<worktree>/.fm-kimi-turnend` after the hook has run, whichever of them the resolved harness needs,, and `bin/fm-teardown.sh` removes `<worktree>/.claude/settings.local.json`, `<worktree>/.opencode/plugins/fm-turn-end.js`, `<worktree>/.fm-grok-turnend` and `<worktree>/.fm-kimi-turnend` when the task is torn down.
+It does not remove `<worktree>/.opencode/plugins/fm-busy-state.js` on that path, so an opencode task can return its slot with that file still present; do not rely on teardown to clear a reserved path for you.
 Write anything else in the copy; treat those five as reserved.
+
+Whatever a hook does write there, the project must already ignore.
+Firstmate excludes only its OWN paths from the copy's git view, so any other file a hook leaves behind is read as the worker's work: an unignored one both blocks that task's ordinary teardown as uncommitted changes - while its pool slot stays leased and unprunable - and is visible to the worker's own `git add -A`, which is how per-slot credentials could reach a commit.
+Have the hook write only paths the project's own `.gitignore` covers.
 
 This does not cost a hook the ability to register a per-slot MCP server, which is the case the directory was added for.
 `claude mcp add` defaults to `--scope local`, which records the server in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json` under the worktree's own path rather than in the copy, so a hook that runs it with the worktree as its working directory (`cd "$1"` - the hook's own cwd is the project checkout) gets a server scoped to that slot alone.
@@ -473,7 +480,8 @@ A hook runs on a fresh spawn only.
 Relaunching an agent into an existing task reuses a copy that may hold the previous agent's uncommitted work, so no hook is run against it; prepare such a copy by hand if it needs it.
 
 A hook has no time limit.
-One that never returns stalls that spawn, and blocks other dispatch and cleanup in the same home until the operator interrupts it; an interrupt unwinds cleanly and releases the lease.
+One that never returns stalls that spawn, and blocks other dispatch and cleanup in the same home until the operator interrupts it.
+An interrupt unwinds cleanly, but it does NOT return the pool slot: the hook had already started, so the abort keeps the lease for the reason given above and prints the path to release by hand.
 
 Secondmate homes do not inherit this directory: a home's hooks name its own project clones and its own local tooling paths.
 A secondmate spawn never runs a hook at all, because it launches into a firstmate home rather than a project worktree.

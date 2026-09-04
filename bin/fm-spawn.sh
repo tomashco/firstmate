@@ -2989,30 +2989,43 @@ spawn_lease_worktree() {
     return 1
   }
   leased=${leased%%$'\n'*}
+  # Recorded for cleanup BEFORE the path is validated: treehouse has already
+  # committed the lease in its persistent state by the time it prints, so a
+  # refusal below must still be able to give the slot back. Recording after the
+  # check would leak it with no return attempted and no remedy printed.
+  SEED_LEASE_PATH=$leased
+  [ -z "$leased" ] || SEED_LEASE_RELEASE=1
   [ -n "$leased" ] && [ -d "$leased" ] || {
     echo "error: treehouse leased '${leased:-nothing}' for $ID, which is not a directory; nothing was typed into endpoint $T" >&2
     return 1
   }
   WT=$leased
   SEED_LEASED=1
-  SEED_LEASE_PATH=$leased
-  SEED_LEASE_RELEASE=1
   return 0
 }
 
-# Run the project's preparation step against the leased or recorded worktree.
-# stdin is /dev/null so the hook can never consume firstmate's text as an
-# answer: a hook that reaches a prompt sees end-of-input and fails, which
-# refuses the spawn. Any non-zero exit refuses - deliberately including a
-# partial success, because a hook that reports gaps is telling firstmate the
-# copy is not ready and pravda's own seeder says so in as many words.
+# Run the project's preparation step against the leased worktree.
+#
+# stdin is /dev/null, and the property that buys is narrower than it looks:
+# no text firstmate would type into a worker's terminal ever reaches the hook,
+# so a launch brief can never be consumed as an answer. A prompt reading STDIN
+# sees end-of-input there and fails, which refuses the spawn. A prompt that
+# opens /dev/tty directly is NOT covered - that is the conventional way secret
+# prompts are written, devenv/secretspec included - and such a hook blocks
+# untimed on the operator's own terminal instead of failing. That is named
+# rather than defended against, because the redirection cannot reach it.
+#
+# Any non-zero exit refuses - deliberately including a partial success, because
+# a hook that reports gaps is telling firstmate the copy is not ready and
+# one such seeder says so in as many words.
 #
 # No time bound, deliberately. A hook that never returns stalls this spawn while
 # it holds the task-set lock, which blocks other dispatch and cleanup in this
-# home until the operator interrupts it - and an interrupt unwinds cleanly
-# through the abort path, releasing the lease. The ceiling is that visible stall;
-# a bound would trade it for a half-prepared copy on a hook that is merely slow,
-# which is the worse failure. Add one only if a hook actually hangs in practice.
+# home until the operator interrupts it. That interrupt unwinds cleanly but does
+# NOT return the pool slot: the hook had started, so spawn_abort_cleanup keeps
+# the lease and prints the path to release by hand. The ceiling is that visible
+# stall; a bound would trade it for a half-prepared copy on a hook that is
+# merely slow, which is the worse failure. Add one only if a hook actually hangs.
 spawn_run_seed_hook() {  # <worktree>
   local wt=$1 rc=0
   # Marked as started, not as finished: a step that fails partway can already

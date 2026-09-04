@@ -254,7 +254,7 @@ test_failed_hook_refuses_with_nothing_typed() {
 }
 
 # A step that reports partial success is telling firstmate the copy is not
-# ready. pravda's own seeder uses exit 3 for exactly this and says in as many
+# ready. One such seeder uses exit 3 for exactly this and says in as many
 # words not to treat the worktree as ready, so it must refuse like any other
 # non-zero exit - and the code must be reported so the operator sees WHICH.
 test_partial_success_refuses_and_names_its_code() {
@@ -338,6 +338,24 @@ test_refusal_before_the_step_releases_the_lease() {
   pass "a refusal before the preparation step releases the copy it leased"
 }
 
+# treehouse commits the lease in its persistent state before it prints the
+# path, so a refusal on the printed path itself must still give the slot back.
+# Recording the lease only after that check would leak it with no `treehouse
+# return` attempted and no remedy printed.
+test_lease_of_a_missing_path_is_released() {
+  local id out
+  id=seed-missingpath-b3
+  make_case seed-missingpath "$id"
+  write_hook "$HOME_DIR/config/seed-hooks/project" 0
+
+  out=$(FM_FAKE_LEASE_PATH_OVERRIDE="$CASE_DIR/vanished-slot" run_spawn "$id") || true
+  assert_contains "$out" "which is not a directory" "the refusal did not name the missing leased path"
+  assert_no_grep 'HOOK ' "$SEND_LOG" "the step ran against a path that does not exist"
+  assert_grep "return --force $CASE_DIR/vanished-slot" "$RETURN_LOG" \
+    "a lease whose path does not exist was not returned to the pool"
+  pass "a lease whose printed path does not exist is still returned to the pool"
+}
+
 # A refusal AFTER the step ran must NOT return the slot: the step may have
 # allocated databases, remote branches or ports that only that project's own
 # release step can free, and a returned slot is handed to the next task while
@@ -418,6 +436,7 @@ test_partial_success_refuses_and_names_its_code
 test_hook_that_reads_stdin_sees_eof_and_refuses
 test_non_executable_hook_refuses_early
 test_refusal_before_the_step_releases_the_lease
+test_lease_of_a_missing_path_is_released
 test_refusal_after_the_step_keeps_the_lease
 test_successful_spawn_keeps_its_lease
 test_project_with_no_hook_is_unaffected
