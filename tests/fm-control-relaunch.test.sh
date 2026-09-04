@@ -914,6 +914,23 @@ EOF
   pass "a relaunch runs no worktree preparation step over the copy holding its work"
 }
 
+# A relaunch reads no hook, so a broken one must not block it either. Recovering
+# a stuck agent is exactly when an operator cannot afford a refusal over a
+# config file this path never uses; a fresh spawn still refuses on it.
+test_relaunch_ignores_an_unusable_worktree_preparation_step() {
+  local dir out
+  dir=$(new_case seedhookbad rl41)
+  add_ship_task "$dir" rl41 claude
+  mkdir -p "$dir/home/config/seed-hooks"
+  ln -s "$dir/no-such-seed-hook" "$dir/home/config/seed-hooks/proj"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl41 --relaunch)
+  assert_contains "$out" "spawned rl41" \
+    "a dangling worktree preparation step blocked the recovery of a stuck agent"
+  pass "a relaunch is not blocked by an unusable worktree preparation step"
+}
+
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
 # from a raw command records that command's basename rather than the exact
 # adapter name. Retirement must resolve the same way, or a task recorded as
@@ -1583,6 +1600,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_relaunch_runs_no_worktree_preparation_step
+test_relaunch_ignores_an_unusable_worktree_preparation_step
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch

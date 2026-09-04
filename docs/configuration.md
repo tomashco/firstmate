@@ -449,10 +449,23 @@ Exit `0` means the worktree is ready and the spawn continues.
 Any non-zero exit refuses the spawn with nothing typed into the worker's terminal, deliberately including a hook that reports partial success: a hook naming gaps is saying the copy is not ready, and launching into it anyway is what this contract exists to prevent.
 A hook that reaches an interactive prompt reads end-of-input and fails, which refuses the spawn rather than answering the prompt with firstmate's own text.
 
+A few paths inside the worktree are firstmate's, not the hook's, and a hook writing them loses its content silently - the spawn continues, because the hook exited `0`.
+`fm-spawn.sh` OVERWRITES `<worktree>/.claude/settings.local.json`, `<worktree>/.opencode/plugins/fm-busy-state.js`, `<worktree>/.fm-grok-turnend` and `<worktree>/.fm-kimi-turnend` after the hook has run, whichever of them the resolved harness needs, and `bin/fm-teardown.sh` deletes all of them (plus `<worktree>/.opencode/plugins/fm-turn-end.js`) when the task is torn down.
+Write anything else in the copy; treat those five as reserved.
+
+This does not cost a hook the ability to register a per-slot MCP server, which is the case the directory was added for.
+`claude mcp add` defaults to `--scope local`, which records the server in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json` under the worktree's own path rather than in the copy, so a hook that runs it with the worktree as its working directory (`cd "$1"` - the hook's own cwd is the project checkout) gets a server scoped to that slot alone.
+Firstmate's later workspace-trust registration merges into that same entry rather than rewriting it (`bin/fm-claude-trust.sh`), and Claude Code reads it at session start - which is after the hook, because the hook now runs before the agent is launched.
+
 The ordering matters beyond capability. A worktree that reaches an interactive prompt during shell startup leaves the pane not reading a command line, so every line typed into it is consumed as a value rather than run.
 For a project with a hook, `fm-spawn.sh` therefore acquires the worktree with `treehouse get --lease` from its own process instead of typing `treehouse get` into the pane, runs the hook, and only then sends the pane into the prepared copy.
-No shell enters the worktree before the hook has answered whatever its startup would otherwise prompt for.
+On those backends no shell enters the worktree before the hook has answered whatever its startup would otherwise prompt for.
+`backend=orca` is the exception, and it refuses instead: it creates the worktree and opens a terminal inside it as one step, before firstmate holds a path it could prepare, so a hooked project spawned on orca fails with an error naming the hook rather than running it after a shell is already in the copy.
+Spawn such a project on a backend that acquires its worktree separately (tmux is the verified reference), or remove the hook.
+
 `bin/fm-teardown.sh` releases that lease through the same `treehouse return` it already uses.
+A lease is stricter than the plain `treehouse get` a hookless project still uses: `treehouse prune` never reclaims a leased worktree, even with no process running inside it, so a hooked task that never reaches teardown - a killed window, a crashed host, a machine restart - holds its pool slot until someone runs `treehouse return --force <path>` by hand, where the same task on a hookless project would eventually be pruned.
+This compounds with the abandoned-spawn case below; reclaiming such orphans automatically is a known follow-up, not something this contract does today.
 A spawn abandoned before the hook ran releases it too, but one abandoned after the hook started deliberately leaves it leased and says so: a hook may have allocated databases, remote branches or ports that only that project's own release step can free, and returning the slot would hand it to the next task while those are still allocated.
 `bin/fm-spawn.sh`'s header owns the residual windows this ordering does not close.
 

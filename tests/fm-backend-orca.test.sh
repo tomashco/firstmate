@@ -572,6 +572,49 @@ test_spawn_refuses_orca_secondmate_before_home_mutation() {
   pass "fm-spawn.sh --backend orca --secondmate: refuses before secondmate-home mutation"
 }
 
+# A project that declares a worktree preparation step (config/seed-hooks/<project>,
+# docs/configuration.md "Project worktree seeding hooks") cannot get the ordering
+# that step exists for on this backend: Orca creates the worktree and opens a
+# terminal inside it as one step, so a shell is already in the copy before
+# firstmate holds a path to prepare. Running the step afterwards would be worse
+# than useless - the pane may already sit at an interactive prompt that eats the
+# launch brief as a value - so the spawn must refuse, and refuse before it has
+# created any Orca resource.
+test_spawn_refuses_orca_hooked_project_before_worktree_creation() {
+  local proj data state config id out status marker
+  id="orcaseedz1"
+  proj="$TMP_ROOT/seed-hook-orca-project"
+  data="$TMP_ROOT/seed-hook-orca-data"
+  state="$TMP_ROOT/seed-hook-orca-state"
+  config="$TMP_ROOT/seed-hook-orca-config"
+  marker="$TMP_ROOT/seed-hook-orca-ran"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config/seed-hooks"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  cat > "$config/seed-hooks/$(basename "$proj")" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+exit 0
+EOF
+  chmod +x "$config/seed-hooks/$(basename "$proj")"
+  orca_case seed-hook-orca
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "backend=orca should refuse a project that declares a worktree preparation step"
+  assert_contains "$out" "backend=orca cannot honor the worktree preparation step" \
+    "the refusal should name the unsupported combination"
+  [ ! -e "$marker" ] \
+    || fail "the preparation step ran on a backend that cannot honor its ordering"
+  assert_absent "$state/$id.meta" "a refused hooked orca spawn must not record metadata"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree' \
+    "the refusal should land before any Orca worktree is created"
+  pass "fm-spawn.sh --backend orca: refuses a hooked project before creating a worktree"
+}
+
 test_spawn_refuses_orca_when_runtime_not_ready() {
   local proj data state config id out status
   id="orcaruntimez6"
@@ -1352,6 +1395,7 @@ test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_orca_secondmate_before_home_mutation
+test_spawn_refuses_orca_hooked_project_before_worktree_creation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails

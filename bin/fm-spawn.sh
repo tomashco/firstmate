@@ -193,6 +193,12 @@
 #   only enter the copy after the step has answered whatever its startup would
 #   otherwise prompt for, because a pane held at an interactive prompt consumes
 #   every typed line as a VALUE - which destroyed shared credentials twice.
+#   The ordering is only available on the backends whose worktree is acquired
+#   after the endpoint exists. backend=orca creates the worktree and opens a
+#   terminal inside it as one step, before firstmate could run anything, so a
+#   hooked project REFUSES to spawn on orca rather than running the step too
+#   late to help; an honest refusal is the right answer for an experimental
+#   backend, and unhooked projects on orca are untouched.
 #   Residual windows this does not close: a project with no hook is untouched;
 #   a relaunch runs no hook at all, because its pane is already inside a copy
 #   that may hold uncommitted work, so a pane that reached a prompt earlier
@@ -1228,7 +1234,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   }
   if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
-    echo "error: this home's task set is locked by another operation (a forced teardown is enumerating or removing its tasks); refusing to create task $ID rather than racing it" >&2
+    echo "error: this home's task set is locked by another operation (a forced teardown enumerating or removing its tasks, or another spawn preparing a worktree and publishing its record - a project's worktree preparation step is untimed, so that spawn can hold this for minutes); refusing to create task $ID rather than racing it" >&2
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
@@ -2312,11 +2318,26 @@ PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_AB
 # firstmate home rather than a project worktree, so it never has one.
 # docs/configuration.md "Project worktree seeding hooks" owns the operator
 # contract; the ordering rationale is beside the run below.
-if [ "$KIND" != secondmate ]; then
+#
+# A relaunch is exempt from all of it, including the refusals. It runs no hook
+# (see the run below), so a broken or unsupported hook must not block recovery
+# of a stuck agent on a file that path never reads.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   SEED_HOOK_PATH="$CONFIG/seed-hooks/$(basename "$PROJ_ABS")"
   if [ -e "$SEED_HOOK_PATH" ] || [ -L "$SEED_HOOK_PATH" ]; then
     if [ ! -f "$SEED_HOOK_PATH" ] || [ ! -x "$SEED_HOOK_PATH" ]; then
       echo "error: $PROJ_ABS declares a worktree preparation step at $SEED_HOOK_PATH, but it is not an executable file (a dangling symlink reads this way too); fix or remove it rather than launching into an unprepared copy" >&2
+      exit 1
+    fi
+    # backend=orca creates the worktree and opens a terminal inside it in one
+    # step, before firstmate holds a path it could prepare, so the step could
+    # only ever run after a shell has already entered the copy - the ordering
+    # this contract exists to guarantee is not available there. Refuse rather
+    # than run it too late to help: the whole point is that a pane which
+    # reached an interactive prompt eats the launch brief as a VALUE, and a
+    # step running afterwards cannot take that back.
+    if [ "$BACKEND" = orca ]; then
+      echo "error: backend=orca cannot honor the worktree preparation step at $SEED_HOOK_PATH, because it opens a terminal inside the new worktree before the step could run; spawn this project on a backend that acquires its worktree separately (tmux is the verified reference), or remove the step" >&2
       exit 1
     fi
     SEED_HOOK=$SEED_HOOK_PATH
